@@ -3,6 +3,8 @@ import { ACCENTS, DEFAULT_PREFERENCES, MODULES, NAV_ITEMS } from './data.js';
 import {
   BrainView, CoreView, Hud, Icon, LogView, ModulesView, Navigation, SettingsView,
 } from './components.jsx';
+import { useAuth } from './contexts/AuthContext.jsx';
+import { loadPreferences, savePreferences, signOut } from './services/userData.js';
 
 const initialMessages = [
   { id: 'welcome', role: 'assistant', text: 'Interface local inicializada. Os comandos disponíveis estão prontos para demonstração.', time: new Date() },
@@ -73,9 +75,13 @@ function createEvent(category, description, level = 'INFO') {
 }
 
 function App() {
+  const { user, profile, profileError, updateDisplayName } = useAuth();
   const [route, setRoute] = useState('core');
   const [reactorState, dispatchReactor] = useReducer(reactorReducer, 'idle');
   const [preferences, setPreferences] = useState(readPreferences);
+  const [preferencesReady, setPreferencesReady] = useState(false);
+  const [preferencesOwnerId, setPreferencesOwnerId] = useState(null);
+  const [preferenceStatus, setPreferenceStatus] = useState('loading');
   const [messages, setMessages] = useState(initialMessages);
   const [events, setEvents] = useState(() => [createEvent('SYSTEM', 'Interface local inicializada.', 'SUCCESS')]);
   const [processing, setProcessing] = useState(false);
@@ -86,6 +92,8 @@ function App() {
   const processingRef = useRef(false);
   const timersRef = useRef([]);
   const noticeTimerRef = useRef(null);
+  const skipNextPreferenceSave = useRef(false);
+  const preferenceLoadFailed = useRef(false);
 
   const logEvent = useCallback((category, description, level = 'INFO') => {
     setEvents((current) => [createEvent(category, description, level), ...current].slice(0, 40));
@@ -99,15 +107,70 @@ function App() {
   }, [logEvent, reactorState]);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem('jarvis.preferences', JSON.stringify(preferences));
-    } catch (error) {
-      console.error('Não foi possível salvar as preferências locais do Jarvis.', error);
-      dispatchReactor('error');
-      logEvent('PREFERENCE', 'Falha ao salvar as preferências locais.', 'ERROR');
-      setNotice('Não foi possível salvar as preferências neste navegador.');
+    if (!user) {
+      setPreferencesReady(false);
+      setPreferencesOwnerId(null);
+      setPreferenceStatus('local');
+      return undefined;
     }
-  }, [logEvent, preferences]);
+
+    let active = true;
+    preferenceLoadFailed.current = false;
+    setPreferencesReady(false);
+    setPreferenceStatus('loading');
+    loadPreferences(user.id).then((loadedPreferences) => {
+      if (!active) return;
+      skipNextPreferenceSave.current = true;
+      setPreferences(loadedPreferences);
+      setPreferencesReady(true);
+      setPreferencesOwnerId(user.id);
+      setPreferenceStatus('saved');
+    }).catch(() => {
+      if (!active) return;
+      preferenceLoadFailed.current = true;
+      setPreferenceStatus('error');
+      setNotice('Não foi possível carregar suas preferências. Atualize a página para tentar novamente.');
+      logEvent('PREFERENCE', 'Falha ao carregar preferências da conta.', 'ERROR');
+    });
+
+    return () => { active = false; };
+  }, [logEvent, user?.id]);
+
+  useEffect(() => {
+    if (!user) {
+      try {
+        window.localStorage.setItem('jarvis.preferences', JSON.stringify(preferences));
+      } catch (error) {
+        console.error('Não foi possível salvar as preferências locais do Jarvis.', error);
+        dispatchReactor('error');
+        logEvent('PREFERENCE', 'Falha ao salvar as preferências locais.', 'ERROR');
+        setPreferenceStatus('error');
+        setNotice('Não foi possível salvar as preferências neste navegador.');
+      }
+      return undefined;
+    }
+    if (!preferencesReady || preferencesOwnerId !== user.id || preferenceLoadFailed.current) return undefined;
+    if (skipNextPreferenceSave.current) {
+      skipNextPreferenceSave.current = false;
+      return undefined;
+    }
+
+    setPreferenceStatus('saving');
+    const timer = window.setTimeout(() => {
+      savePreferences(user.id, preferences).then(() => {
+        setPreferenceStatus('saved');
+      }).catch(() => {
+        setPreferenceStatus('error');
+        setNotice('Não foi possível salvar suas preferências. Verifique a conexão e atualize para tentar novamente.');
+        logEvent('PREFERENCE', 'Falha ao salvar preferências da conta.', 'ERROR');
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [logEvent, preferences, preferencesOwnerId, preferencesReady, user]);
+
+  useEffect(() => {
+    if (profileError) setNotice(profileError);
+  }, [profileError]);
 
   useEffect(() => () => {
     timersRef.current.forEach(window.clearTimeout);
@@ -139,6 +202,21 @@ function App() {
     if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
     noticeTimerRef.current = window.setTimeout(() => setNotice(''), 3500);
   }, []);
+
+  const handleSignOut = useCallback(async () => {
+    try {
+      await signOut();
+    } catch {
+      showNotice('Não foi possível encerrar a sessão. Tente novamente.');
+    }
+  }, [showNotice]);
+
+  const handleProfileSave = useCallback(async (displayName) => {
+    if (displayName.trim().length < 2 || displayName.trim().length > 80) {
+      throw new Error('O nome deve ter entre 2 e 80 caracteres.');
+    }
+    return updateDisplayName(displayName);
+  }, [updateDisplayName]);
 
   const sendCommand = useCallback((rawCommand) => {
     const command = rawCommand.trim();
@@ -220,7 +298,9 @@ function App() {
           updatePreference('accent', next);
         }}
         reactorState={reactorState}
-        onProfile={() => showNotice('Perfil local de demonstração — nenhuma autenticação ativa.')}
+        profile={profile}
+        email={user.email}
+        onSignOut={handleSignOut}
       />
       <div className="workspace">
         <Navigation active={route} onNavigate={changeRoute} />
@@ -240,12 +320,12 @@ function App() {
           {route === 'brain' && <BrainView />}
           {route === 'log' && <LogView events={events} />}
           {route === 'modules' && <ModulesView onOpenModule={setModuleDetail} onNavigate={changeRoute} />}
-          {route === 'settings' && <SettingsView preferences={preferences} onChange={updatePreference} />}
+          {route === 'settings' && <SettingsView preferences={preferences} onChange={updatePreference} persistenceStatus={preferenceStatus} profile={profile} onSaveProfile={handleProfileSave} />}
         </main>
       </div>
       <footer className="system-footer">
-        <span><span className="footer-dot" /> INTERFACE LOCAL</span>
-        <span>SEM CONEXÃO EXTERNA</span>
+        <span><span className="footer-dot" /> CONTA AUTENTICADA</span>
+        <span>PREFERÊNCIAS INDIVIDUAIS</span>
         <span>BUILD 01.01 · {sessionId}</span>
       </footer>
       {notice && <div className="toast" role="status"><Icon name="info" size={15} />{notice}</div>}

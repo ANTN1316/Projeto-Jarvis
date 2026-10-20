@@ -35,7 +35,7 @@ export function Icon({ name, size = 18, className = '' }) {
   );
 }
 
-export function Hud({ sessionId, onSettings, accent, onAccent, reactorState, onProfile }) {
+export function Hud({ sessionId, onSettings, accent, onAccent, reactorState, profile, email, onSignOut }) {
   const [now, setNow] = useState(new Date());
   const [profileOpen, setProfileOpen] = useState(false);
   useEffect(() => {
@@ -48,7 +48,7 @@ export function Hud({ sessionId, onSettings, accent, onAccent, reactorState, onP
       <a className="brand" href="#main-content" aria-label="J.A.R.V.I.S. — ir ao conteúdo principal">
         <span className="brand-mark"><span /><i /><b /></span>
         <span className="brand-copy"><strong>J.A.R.V.I.S.</strong><small>NEURAL INTERFACE</small></span>
-        <span className="brand-live"><i /> LOCAL</span>
+        <span className="brand-live"><i /> AUTH</span>
       </a>
       <div className="hud-center">
         <div className="clock-block"><strong>{now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</strong><span>{now.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })}</span></div>
@@ -61,10 +61,10 @@ export function Hud({ sessionId, onSettings, accent, onAccent, reactorState, onP
         <button className="icon-button" onClick={onSettings} aria-label="Abrir configurações" title="Configurações"><Icon name="settings" /></button>
         <span className={`mic-indicator ${reactorState === 'listening' ? 'is-listening' : ''}`} title="Microfone não conectado"><Icon name="mic" size={17} /><i /></span>
         <div className="profile-wrap">
-          <button className="profile-button" onClick={() => setProfileOpen((open) => !open)} aria-expanded={profileOpen} aria-label="Perfil local de demonstração">
-            <span className="avatar"><Icon name="user" size={17} /></span><span className="profile-copy">LOCAL<span>DEMO</span></span>
+          <button className="profile-button" onClick={() => setProfileOpen((open) => !open)} aria-expanded={profileOpen} aria-label={`Conta de ${profile?.display_name || email || 'usuário'}`}>
+            <span className="avatar"><Icon name="user" size={17} /></span><span className="profile-copy">{profile?.display_name || 'USUÁRIO'}<span>CONTA</span></span>
           </button>
-          {profileOpen && <div className="profile-popover"><b>Perfil de demonstração</b><span>Esta sessão é local e não autenticada.</span><button onClick={() => { setProfileOpen(false); onProfile(); }}>ENTENDI <Icon name="arrow" size={13} /></button></div>}
+          {profileOpen && <div className="profile-popover"><b>{profile?.display_name || 'Conta Jarvis'}</b><span>{email}</span><button onClick={() => { setProfileOpen(false); onSignOut(); }}>ENCERRAR SESSÃO <Icon name="arrow" size={13} /></button></div>}
         </div>
       </div>
     </header>
@@ -299,11 +299,39 @@ export function ModulesView({ onOpenModule, onNavigate }) {
   );
 }
 
-export function SettingsView({ preferences, onChange }) {
+export function SettingsView({ preferences, onChange, persistenceStatus, profile, onSaveProfile }) {
+  const [displayName, setDisplayName] = useState(profile?.display_name || '');
+  const [profileMessage, setProfileMessage] = useState('');
+  const [profileBusy, setProfileBusy] = useState(false);
+  useEffect(() => setDisplayName(profile?.display_name || ''), [profile?.display_name]);
+
+  const submitProfile = async (event) => {
+    event.preventDefault();
+    setProfileBusy(true);
+    setProfileMessage('');
+    try {
+      await onSaveProfile(displayName);
+      setProfileMessage('Nome de exibição atualizado.');
+    } catch {
+      setProfileMessage('Não foi possível atualizar o perfil. Tente novamente.');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
   return (
     <div className="view-content settings-view">
-      <PageHeading eyebrow="PREFERÊNCIAS / 05" title="Configurações" subtitle="Ajustes visuais armazenados somente neste navegador." aside={<span className="saved-indicator"><Icon name="check" size={14} /> SALVAMENTO LOCAL</span>} />
+      <PageHeading eyebrow="PREFERÊNCIAS / 05" title="Configurações" subtitle="Perfil da conta e preferências individuais." aside={<span className="saved-indicator"><Icon name={persistenceStatus === 'saved' ? 'check' : 'info'} size={14} /> {persistenceStatus === 'saved' ? 'SALVO NA CONTA' : persistenceStatus === 'saving' ? 'SALVANDO…' : persistenceStatus === 'error' ? 'FALHA AO SALVAR' : 'CARREGANDO'}</span>} />
       <div className="settings-layout">
+        <section className="panel settings-panel account-settings">
+          <div className="panel-heading"><span className="panel-index">00</span><div><h2>Conta</h2><small>PERFIL INDIVIDUAL</small></div></div>
+          <form className="profile-edit-form" onSubmit={submitProfile}>
+            <label htmlFor="profile-display-name">Nome de exibição</label>
+            <input id="profile-display-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} minLength={2} maxLength={80} required />
+            <button className="button-secondary" type="submit" disabled={profileBusy || displayName.trim() === profile?.display_name}>{profileBusy ? 'SALVANDO…' : 'ATUALIZAR PERFIL'}</button>
+            {profileMessage && <span role="status">{profileMessage}</span>}
+          </form>
+        </section>
         <section className="panel settings-panel"><div className="panel-heading"><span className="panel-index">01</span><div><h2>Apresentação</h2><small>PERSONALIZE A INTERFACE</small></div></div>
           <label className="setting-row"><span className="setting-copy"><b>Intensidade dos efeitos</b><small>Ajusta a presença de luzes e destaques.</small></span><span className="range-value">{preferences.intensity}<small>%</small></span><input className="intensity-range" type="range" min="0" max="100" value={preferences.intensity} style={{ '--range-progress': `${preferences.intensity}%` }} onChange={(event) => onChange('intensity', Number(event.target.value))} aria-label="Intensidade dos efeitos visuais" /></label>
           <div className="setting-row"><span className="setting-copy"><b>Partículas ambientais</b><small>Ativa detalhes visuais decorativos.</small></span><Toggle checked={preferences.particles} onChange={(value) => onChange('particles', value)} label="Partículas ambientais" /></div>
@@ -313,7 +341,7 @@ export function SettingsView({ preferences, onChange }) {
           <div className="setting-block"><span className="setting-copy"><b>Cor de destaque</b><small>Aplica-se aos sinais e interações importantes.</small></span><div className="accent-options">{[{ id: 'blue', label: 'Azul ciano', color: '#37D7FF' }, { id: 'green', label: 'Verde', color: '#43E6B0' }, { id: 'violet', label: 'Violeta', color: '#A78BFA' }, { id: 'red', label: 'Vermelho', color: '#FF758F' }].map((accent) => <button key={accent.id} className={`accent-option${preferences.accent === accent.id ? ' selected' : ''}`} onClick={() => onChange('accent', accent.id)} aria-label={`Tema ${accent.label}`} aria-pressed={preferences.accent === accent.id}><i style={{ backgroundColor: accent.color }} /><span>{accent.label}</span>{preferences.accent === accent.id && <Icon name="check" size={14} />}</button>)}</div></div>
           <div className="setting-block density-setting"><span className="setting-copy"><b>Densidade da interface</b><small>Escolha o espaçamento dos painéis.</small></span><div className="density-options"><button className={preferences.density === 'comfortable' ? 'selected' : ''} onClick={() => onChange('density', 'comfortable')}><span className="density-icon comfortable-icon"><i /><i /><i /></span>Confortável</button><button className={preferences.density === 'compact' ? 'selected' : ''} onClick={() => onChange('density', 'compact')}><span className="density-icon compact-icon"><i /><i /><i /></span>Compacta</button></div></div>
         </section>
-        <section className="panel privacy-panel"><span className="privacy-icon"><Icon name="settings" size={19} /></span><div><h2>Preferências locais</h2><p>São salvas no localStorage deste navegador. Nenhuma conta, senha, chave de API ou informação sensível é solicitada ou armazenada.</p></div><span className="local-only-tag">LOCAL ONLY</span></section>
+        <section className="panel privacy-panel"><span className="privacy-icon"><Icon name="settings" size={19} /></span><div><h2>Dados da conta</h2><p>Seu perfil e suas preferências são armazenados na sua conta. As políticas do banco restringem o acesso aos seus próprios registros.</p></div><span className="local-only-tag">RLS PROTECTED</span></section>
       </div>
     </div>
   );
