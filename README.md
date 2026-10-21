@@ -24,11 +24,11 @@ Aplicação React + Vite para a interface do J.A.R.V.I.S. A Fase 2 adiciona aute
 
 ```bash
 npm install
-Copy-Item .env.example .env
+Copy-Item .env.example .env.local
 npm run dev
 ```
 
-Edite `.env` com os valores do seu projeto. O Vite precisa ser reiniciado após alterar variáveis de ambiente.
+Edite `.env.local` com os valores do seu projeto. O Vite precisa ser reiniciado após alterar variáveis de ambiente. `.env.local` é ignorado pelo Git.
 
 ```env
 VITE_SUPABASE_URL=https://<project-ref>.supabase.co
