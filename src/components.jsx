@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CATEGORY_COLORS, MODULES, NAV_ITEMS, NOTE_LINKS, NOTES } from './data.js';
 
 const iconPaths = {
@@ -143,19 +143,40 @@ function Metric({ label, value, detail }) {
   return <div className="metric-row"><span>{label}</span><strong>{value}</strong>{detail && <small>{detail}</small>}</div>;
 }
 
-export function CoreView({ reactorState, onToggleListening, messages, onSend, processing, onInterrupt, onClear, onNavigate }) {
+export function CoreView({
+  reactorState,
+  onToggleListening,
+  messages,
+  onSend,
+  processing,
+  onInterrupt,
+  onNewConversation,
+  conversations,
+  activeConversationId,
+  conversationsLoading,
+  hasMoreConversations,
+  onLoadMoreConversations,
+  onSelectConversation,
+  messagesLoading,
+  historyLoading,
+  hasOlderMessages,
+  onLoadOlderMessages,
+  failedMessageId,
+  onRetry,
+  onNavigate,
+}) {
   return (
     <div className="view-content core-view">
-      <PageHeading eyebrow="J.A.R.V.I.S. / CENTRAL DE COMANDO" title="Núcleo de inteligência" subtitle="Interface local para interação e visualização demonstrativa." aside={<StateLabel state={reactorState} />} />
+      <PageHeading eyebrow="J.A.R.V.I.S. / CENTRAL DE COMANDO" title="Núcleo de inteligência" subtitle="Converse com o assistente e explore a interface Jarvis." aside={<StateLabel state={reactorState} />} />
       <div className="core-layout">
         <aside className="side-column left-column">
           <section className="panel status-panel">
-            <div className="panel-heading"><span className="panel-index">01</span><div><h2>Diagnóstico</h2><small>ESTADO DA INTERFACE</small></div><span className="tiny-live">LOCAL</span></div>
+            <div className="panel-heading"><span className="panel-index">01</span><div><h2>Diagnóstico</h2><small>ESTADO DA INTERFACE</small></div><span className="tiny-live">ONLINE</span></div>
             <div className="diagnostic-graphic"><div className="diagnostic-crosshair"><span /><i /></div><div className="diagnostic-readout"><small>CORE LOAD</small><strong>—<em>%</em></strong><span>NÃO MEDIDO</span></div></div>
             <Metric label="Interface" value="ATIVA" />
             <Metric label="Rede externa" value="NÃO VERIFICADA" />
-            <Metric label="Serviços" value="0 CONECTADOS" />
-            <div className="panel-footnote"><Icon name="info" size={13} /> Sem integração com backend nesta fase.</div>
+            <Metric label="Serviços" value="IA SOB DEMANDA" />
+            <div className="panel-footnote"><Icon name="info" size={13} /> Mensagens livres usam a Edge Function autenticada.</div>
           </section>
           <section className="panel quick-panel">
             <div className="panel-heading"><span className="panel-index">02</span><div><h2>Atalhos</h2><small>COMANDOS DE NAVEGAÇÃO</small></div></div>
@@ -164,8 +185,28 @@ export function CoreView({ reactorState, onToggleListening, messages, onSend, pr
           </section>
         </aside>
         <section className="center-column" aria-label="Interação com o núcleo">
-          <div className="reactor-stage"><div className="stage-topline"><span>NEURAL CORE <i>·</i> V.01</span><span>INTERFACE ONLY</span></div><Reactor state={reactorState} onActivate={onToggleListening} /><div className="reactor-state-copy"><StateLabel state={reactorState} /><p>{reactorState === 'listening' ? 'Demonstração ativa · áudio não capturado' : reactorState === 'thinking' ? 'Analisando comando local...' : reactorState === 'speaking' ? 'Resposta gerada pelo motor local' : reactorState === 'success' ? 'Interação local finalizada' : 'Toque no núcleo para iniciar uma escuta simulada'}</p></div><div className="stage-bottomline"><span>LATÊNCIA LOCAL <b>—</b></span><span><i className="mini-dot" /> SISTEMA PRONTO</span><span>NO BACKEND</span></div></div>
-          <CommandConsole messages={messages} onSend={onSend} processing={processing} onInterrupt={onInterrupt} onClear={onClear} onToggleListening={onToggleListening} reactorState={reactorState} />
+              <div className="reactor-stage"><div className="stage-topline"><span>NEURAL CORE <i>·</i> V.01</span><span>INTERFACE JARVIS</span></div><Reactor state={reactorState} onActivate={onToggleListening} /><div className="reactor-state-copy"><StateLabel state={reactorState} /><p>{reactorState === 'listening' ? 'Demonstração ativa · áudio não capturado' : reactorState === 'thinking' ? 'Processando mensagem...' : reactorState === 'speaking' ? 'Resposta do assistente recebida' : reactorState === 'success' ? 'Interação finalizada' : 'Toque no núcleo para iniciar uma escuta simulada'}</p></div><div className="stage-bottomline"><span>LATÊNCIA <b>—</b></span><span><i className="mini-dot" /> ASSISTENTE</span><span>EDGE FUNCTION</span></div></div>
+          <CommandConsole
+            messages={messages}
+            onSend={onSend}
+            processing={processing}
+            onInterrupt={onInterrupt}
+            onNewConversation={onNewConversation}
+            conversations={conversations}
+            activeConversationId={activeConversationId}
+            conversationsLoading={conversationsLoading}
+            hasMoreConversations={hasMoreConversations}
+            onLoadMoreConversations={onLoadMoreConversations}
+            onSelectConversation={onSelectConversation}
+            messagesLoading={messagesLoading}
+            historyLoading={historyLoading}
+            hasOlderMessages={hasOlderMessages}
+            onLoadOlderMessages={onLoadOlderMessages}
+            failedMessageId={failedMessageId}
+            onRetry={onRetry}
+            onToggleListening={onToggleListening}
+            reactorState={reactorState}
+          />
         </section>
         <aside className="side-column right-column">
           <section className="panel telemetry-panel">
@@ -187,36 +228,86 @@ export function CoreView({ reactorState, onToggleListening, messages, onSend, pr
   );
 }
 
-function CommandConsole({ messages, onSend, processing, onInterrupt, onClear, onToggleListening, reactorState }) {
+function CommandConsole({
+  messages,
+  onSend,
+  processing,
+  onInterrupt,
+  onNewConversation,
+  conversations,
+  activeConversationId,
+  conversationsLoading,
+  hasMoreConversations,
+  onLoadMoreConversations,
+  onSelectConversation,
+  messagesLoading,
+  historyLoading,
+  hasOlderMessages,
+  onLoadOlderMessages,
+  failedMessageId,
+  onRetry,
+  onToggleListening,
+  reactorState,
+}) {
   const [draft, setDraft] = useState('');
   const messageListRef = useRef(null);
-  useEffect(() => {
-    if (messageListRef.current) messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+  const preserveScrollHeightRef = useRef(null);
+  const awaitingReply = messages.at(-1)?.role === 'user';
+  useLayoutEffect(() => {
+    if (!messageListRef.current) return;
+    if (preserveScrollHeightRef.current !== null) {
+      messageListRef.current.scrollTop += messageListRef.current.scrollHeight - preserveScrollHeightRef.current;
+      preserveScrollHeightRef.current = null;
+      return;
+    }
+    messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
   }, [messages, processing]);
+  const loadOlder = () => {
+    preserveScrollHeightRef.current = messageListRef.current?.scrollHeight ?? null;
+    onLoadOlderMessages();
+  };
   const submit = (event) => {
     event.preventDefault();
-    if (!draft.trim() || processing) return;
+    if (!draft.trim() || draft.trim().length > 4000 || processing) return;
     onSend(draft);
     setDraft('');
   };
   return (
     <section className="panel command-console">
-      <div className="console-header"><div className="console-assistant"><span className="assistant-glyph"><Icon name="spark" size={16} /></span><span><b>J.A.R.V.I.S.</b><small>ASSISTENTE LOCAL · DEMONSTRAÇÃO</small></span></div><div className="console-actions"><span className="console-status"><i /> {processing ? 'PROCESSANDO' : 'PRONTO'}</span><button className="icon-button small" onClick={onClear} aria-label="Limpar conversa local" title="Limpar conversa"><Icon name="trash" size={15} /></button></div></div>
+      <div className="console-header"><div className="console-assistant"><span className="assistant-glyph"><Icon name="spark" size={16} /></span><span><b>J.A.R.V.I.S.</b><small>CONVERSAS PRIVADAS · SALVAS NA CONTA</small></span></div><div className="console-actions"><span className="console-status"><i /> {processing ? 'PROCESSANDO' : 'PRONTO'}</span><button className="button-secondary new-conversation-button" onClick={onNewConversation}><Icon name="plus" size={14} /> NOVA</button></div></div>
+      <div className="conversation-strip" aria-label="Suas conversas">
+        {conversationsLoading && !conversations.length && <span className="conversation-loading">Carregando conversas…</span>}
+        {conversations.map((conversation) => (
+          <button
+            key={conversation.id}
+            className={`conversation-tab${activeConversationId === conversation.id ? ' active' : ''}`}
+            onClick={() => onSelectConversation(conversation.id)}
+            aria-current={activeConversationId === conversation.id ? 'page' : undefined}
+            title={conversation.title}
+          >{conversation.title}</button>
+        ))}
+        {hasMoreConversations && <button className="conversation-more" onClick={onLoadMoreConversations} disabled={conversationsLoading}>MAIS</button>}
+        {!conversations.length && !conversationsLoading && <span className="conversation-loading">Nenhuma conversa salva.</span>}
+      </div>
       <div className="message-list" ref={messageListRef} aria-live="polite" aria-label="Histórico de conversa">
+        {hasOlderMessages && <button className="history-more" onClick={loadOlder} disabled={historyLoading}>{historyLoading ? 'CARREGANDO…' : 'CARREGAR MENSAGENS ANTERIORES'}</button>}
+        {messagesLoading && !messages.length && <div className="empty-conversation">Carregando histórico…</div>}
         {messages.map((message) => <div className={`message message-${message.role}`} key={message.id}><span className="message-avatar">{message.role === 'user' ? 'U' : <Icon name="spark" size={13} />}</span><div className="message-body"><div><b>{message.role === 'user' ? 'VOCÊ' : 'J.A.R.V.I.S.'}</b><time>{message.time.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time></div><p>{message.text}</p></div></div>)}
         {processing && <div className="message message-assistant typing-message"><span className="message-avatar"><Icon name="spark" size={13} /></span><span className="typing-dots" aria-label="Processando"><i /><i /><i /></span></div>}
-        {!messages.length && <div className="empty-conversation"><Icon name="spark" size={17} /> Histórico local vazio. Envie um comando para começar.</div>}
+        {!messages.length && !messagesLoading && !activeConversationId && <div className="empty-conversation"><Icon name="spark" size={17} /> Crie uma conversa para começar.</div>}
+        {!messages.length && !messagesLoading && activeConversationId && <div className="empty-conversation"><Icon name="spark" size={17} /> Esta conversa está pronta para sua primeira mensagem.</div>}
+        {failedMessageId && <div className="retry-row"><span>Esta mensagem ainda não recebeu resposta.</span><button onClick={() => onRetry(failedMessageId)} disabled={processing}>TENTAR NOVAMENTE</button></div>}
       </div>
       <div className="command-suggestions"><span>EXPERIMENTE</span>{['Olá, Jarvis.', 'Status do sistema.', 'Abrir Second Brain.'].map((suggestion) => <button key={suggestion} onClick={() => { setDraft(suggestion); }} disabled={processing}>{suggestion}</button>)}</div>
       <form className="command-form" onSubmit={submit}>
-        <label htmlFor="command-input" className="sr-only">Digite um comando para o assistente local</label>
-        <textarea id="command-input" rows="1" value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(event); } }} placeholder="Digite um comando demonstrativo..." disabled={processing} />
-        <span className="input-hint">ENTER PARA ENVIAR · SHIFT + ENTER PARA NOVA LINHA</span>
+        <label htmlFor="command-input" className="sr-only">Digite uma mensagem para o Jarvis</label>
+        <textarea id="command-input" rows="1" maxLength={4000} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(event); } }} placeholder={awaitingReply ? 'Reenvie a mensagem pendente para continuar...' : 'Escreva uma mensagem...'} disabled={processing || messagesLoading || awaitingReply} />
+        <span className="input-hint">{draft.length}/4000 · ENTER ENVIA · SHIFT + ENTER QUEBRA LINHA</span>
         <button className={`mic-demo-button${reactorState === 'listening' ? ' active' : ''}`} type="button" onClick={onToggleListening} disabled={processing} aria-pressed={reactorState === 'listening'} aria-label={reactorState === 'listening' ? 'Encerrar escuta simulada; nenhum áudio está sendo capturado' : 'Iniciar escuta simulada; nenhum áudio será capturado'} title="Escuta simulada · áudio não capturado"><Icon name="mic" size={16} /></button>
-        <button className="send-button" type="submit" disabled={!draft.trim() || processing} aria-label="Enviar comando"><Icon name="send" size={17} /></button>
+        <button className="send-button" type="submit" disabled={!draft.trim() || processing || messagesLoading || awaitingReply} aria-label="Enviar mensagem"><Icon name="send" size={17} /></button>
         {processing && <button type="button" className="interrupt-button" onClick={onInterrupt} aria-label="Interromper interação"><Icon name="stop" size={16} /></button>}
       </form>
-      <div className="console-disclaimer"><Icon name="info" size={13} /> Motor local de demonstração · sem IA externa · microfone não conectado</div>
+      <div className="console-disclaimer"><Icon name="info" size={13} /> Mensagens e respostas ficam salvas na sua conta e são enviadas à OpenAI. Evite dados sensíveis.</div>
     </section>
   );
 }
@@ -284,7 +375,7 @@ export function LogView({ events }) {
         <div className="log-table-wrap"><table className="log-table"><thead><tr><th>HORÁRIO</th><th>NÍVEL</th><th>CATEGORIA</th><th>EVENTO</th><th>ORIGEM</th></tr></thead><tbody>{filtered.map((event) => <tr key={event.id}><td className="mono">{event.time.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td><td><span className={`level-tag level-${event.level.toLowerCase()}`}><i />{event.level}</span></td><td><span className="event-category">{event.category}</span></td><td>{event.description}</td><td className="log-origin">LOCAL UI</td></tr>)}</tbody></table>{!filtered.length && <div className="empty-state">Nenhum evento encontrado para este nível.</div>}</div>
         <div className="log-footer"><span><i className="status-pulse" /> CAPTURA LOCAL ATIVA</span><span>RETENÇÃO EM MEMÓRIA · MÁXIMO 40 REGISTROS</span></div>
       </section>
-      <div className="log-notice"><Icon name="info" size={16} /><p><b>Privacidade por padrão.</b> O log registra somente navegação, comandos demonstrativos e preferências visuais. Não há backend, credenciais ou dados pessoais neste sistema.</p></div>
+      <div className="log-notice"><Icon name="info" size={16} /><p><b>Privacidade por padrão.</b> Este log é local e registra navegação e preferências visuais. O conteúdo da conversa não é persistido nesta fase.</p></div>
     </div>
   );
 }

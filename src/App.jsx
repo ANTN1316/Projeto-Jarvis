@@ -5,10 +5,10 @@ import {
 } from './components.jsx';
 import { useAuth } from './contexts/AuthContext.jsx';
 import { loadPreferences, savePreferences, signOut } from './services/userData.js';
+import { sendAssistantMessage } from './services/assistant.js';
+import { addUserMessage, createConversation, listConversations, listMessages, touchConversation } from './services/chat.js';
 
-const initialMessages = [
-  { id: 'welcome', role: 'assistant', text: 'Interface local inicializada. Os comandos disponíveis estão prontos para demonstração.', time: new Date() },
-];
+const MAX_MESSAGE_LENGTH = 4000;
 
 const transitions = {
   idle: ['listening', 'thinking', 'error'],
@@ -49,25 +49,19 @@ function normalizeCommand(value) {
 
 function getCommandResult(command) {
   const normalized = normalizeCommand(command);
-  if (/^(oi|ola)( jarvis)?$/.test(normalized)) {
-    return { text: 'Olá. Estou operando em modo de demonstração local. Como posso ajudar?', route: null };
-  }
-  if (/status do sistema|status$/.test(normalized)) {
-    return { text: 'Interface ativa · sessão local · serviços externos não verificados · integrações não conectadas.', route: null };
-  }
   if (/abrir second brain|second brain/.test(normalized)) {
-    return { text: 'Abrindo o mapa demonstrativo do Second Brain.', route: 'brain' };
+    return { route: 'brain' };
   }
   if (/mostrar modulos|abrir modulos|modulos/.test(normalized)) {
-    return { text: 'Exibindo o catálogo de módulos e seus estados atuais.', route: 'modules' };
+    return { route: 'modules' };
   }
   if (/abrir configuracoes|configuracoes|settings/.test(normalized)) {
-    return { text: 'Abrindo as preferências visuais locais.', route: 'settings' };
+    return { route: 'settings' };
   }
   if (/voltar ao nucleo|voltar para o nucleo|abrir core/.test(normalized)) {
-    return { text: 'Retornando ao núcleo de interação.', route: 'core' };
+    return { route: 'core' };
   }
-  return { text: 'Esse comando ainda não está implementado nesta demonstração local.', route: null };
+  return null;
 }
 
 function createEvent(category, description, level = 'INFO') {
@@ -82,7 +76,17 @@ function App() {
   const [preferencesReady, setPreferencesReady] = useState(false);
   const [preferencesOwnerId, setPreferencesOwnerId] = useState(null);
   const [preferenceStatus, setPreferenceStatus] = useState('loading');
-  const [messages, setMessages] = useState(initialMessages);
+  const [messages, setMessages] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState(null);
+  const [conversationCursor, setConversationCursor] = useState(null);
+  const [hasMoreConversations, setHasMoreConversations] = useState(false);
+  const [messagesCursor, setMessagesCursor] = useState(null);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [failedMessageId, setFailedMessageId] = useState(null);
   const [events, setEvents] = useState(() => [createEvent('SYSTEM', 'Interface local inicializada.', 'SUCCESS')]);
   const [processing, setProcessing] = useState(false);
   const [moduleDetail, setModuleDetail] = useState(null);
@@ -90,7 +94,15 @@ function App() {
   const [sessionId] = useState(() => `JRV-${Math.random().toString(36).slice(2, 8).toUpperCase()}`);
   const previousReactorState = useRef('idle');
   const processingRef = useRef(false);
+  const creatingConversationRef = useRef(false);
   const timersRef = useRef([]);
+  const requestControllerRef = useRef(null);
+  const requestIdRef = useRef(0);
+  const historyRequestIdRef = useRef(0);
+  const activeConversationRef = useRef(null);
+  const messagesRef = useRef([]);
+  const inFlightMessageRef = useRef(null);
+  const pendingDraftRef = useRef(new Map());
   const noticeTimerRef = useRef(null);
   const skipNextPreferenceSave = useRef(false);
   const preferenceLoadFailed = useRef(false);
@@ -98,6 +110,10 @@ function App() {
   const logEvent = useCallback((category, description, level = 'INFO') => {
     setEvents((current) => [createEvent(category, description, level), ...current].slice(0, 40));
   }, []);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   useEffect(() => {
     if (previousReactorState.current !== reactorState) {
@@ -173,6 +189,8 @@ function App() {
   }, [profileError]);
 
   useEffect(() => () => {
+    requestIdRef.current += 1;
+    requestControllerRef.current?.abort();
     timersRef.current.forEach(window.clearTimeout);
     if (noticeTimerRef.current) window.clearTimeout(noticeTimerRef.current);
   }, []);
@@ -204,6 +222,8 @@ function App() {
   }, []);
 
   const handleSignOut = useCallback(async () => {
+    requestIdRef.current += 1;
+    requestControllerRef.current?.abort();
     try {
       await signOut();
     } catch {
@@ -218,36 +238,297 @@ function App() {
     return updateDisplayName(displayName);
   }, [updateDisplayName]);
 
-  const sendCommand = useCallback((rawCommand) => {
+  useEffect(() => {
+    if (!user) {
+      activeConversationRef.current = null;
+      setConversations([]);
+      setActiveConversationId(null);
+      setMessages([]);
+      messagesRef.current = [];
+      setConversationCursor(null);
+      setHasMoreConversations(false);
+      setConversationsLoading(false);
+      setFailedMessageId(null);
+      setProcessing(false);
+      processingRef.current = false;
+      inFlightMessageRef.current = null;
+      pendingDraftRef.current.clear();
+      return undefined;
+    }
+
+    let active = true;
+    setConversationsLoading(true);
+    setMessages([]);
+    messagesRef.current = [];
+    setConversations([]);
+    setActiveConversationId(null);
+    activeConversationRef.current = null;
+    listConversations().then((page) => {
+      if (!active) return;
+      setConversations(page.conversations);
+      setConversationCursor(page.nextCursor);
+      setHasMoreConversations(page.hasMore);
+      const firstConversation = page.conversations[0] || null;
+      activeConversationRef.current = firstConversation?.id || null;
+      setActiveConversationId(firstConversation?.id || null);
+    }).catch(() => {
+      if (active) showNotice('Não foi possível carregar suas conversas. Verifique a conexão e tente novamente.');
+    }).finally(() => {
+      if (active) setConversationsLoading(false);
+    });
+    return () => { active = false; };
+  }, [showNotice, user?.id]);
+
+  useEffect(() => {
+    if (!activeConversationId || activeConversationRef.current !== activeConversationId) {
+      setMessages([]);
+      setMessagesCursor(null);
+      setHasOlderMessages(false);
+      setMessagesLoading(false);
+      setFailedMessageId(null);
+      return undefined;
+    }
+
+    let active = true;
+    const requestId = ++historyRequestIdRef.current;
+    setMessages([]);
+    messagesRef.current = [];
+    setMessagesLoading(true);
+    setFailedMessageId(null);
+    listMessages(activeConversationId).then((page) => {
+      if (!active || requestId !== historyRequestIdRef.current) return;
+      setMessages(page.messages);
+      messagesRef.current = page.messages;
+      setMessagesCursor(page.nextCursor);
+      setHasOlderMessages(page.hasMore);
+      if (page.messages.at(-1)?.role === 'user') {
+        setFailedMessageId(page.messages.at(-1).id);
+      }
+    }).catch(() => {
+      if (active) showNotice('Não foi possível carregar as mensagens desta conversa.');
+    }).finally(() => {
+      if (active) setMessagesLoading(false);
+    });
+    return () => { active = false; };
+  }, [activeConversationId, showNotice]);
+
+  const cancelPendingRequest = useCallback(() => {
+    requestIdRef.current += 1;
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = null;
+    timersRef.current.forEach(window.clearTimeout);
+    timersRef.current = [];
+    processingRef.current = false;
+    inFlightMessageRef.current = null;
+    setProcessing(false);
+    dispatchReactor('idle');
+  }, []);
+
+  const selectConversation = useCallback((conversationId) => {
+    if (conversationId === activeConversationRef.current) return;
+    if (processingRef.current) {
+      setFailedMessageId(inFlightMessageRef.current);
+      cancelPendingRequest();
+    }
+    activeConversationRef.current = conversationId;
+    messagesRef.current = [];
+    setMessages([]);
+    setActiveConversationId(conversationId);
+  }, [cancelPendingRequest]);
+
+  const handleNewConversation = useCallback(async () => {
+    if (creatingConversationRef.current) return;
+    if (processingRef.current) {
+      setFailedMessageId(inFlightMessageRef.current);
+      cancelPendingRequest();
+    }
+    creatingConversationRef.current = true;
+    try {
+      const conversation = await createConversation();
+      setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
+      activeConversationRef.current = conversation.id;
+      messagesRef.current = [];
+      setActiveConversationId(conversation.id);
+      setMessages([]);
+      setFailedMessageId(null);
+    } catch {
+      showNotice('Não foi possível criar uma conversa. Tente novamente.');
+    } finally {
+      creatingConversationRef.current = false;
+    }
+  }, [cancelPendingRequest, showNotice]);
+
+  const loadMoreConversations = useCallback(async () => {
+    if (!conversationCursor || conversationsLoading) return;
+    setConversationsLoading(true);
+    try {
+      const page = await listConversations({ cursor: conversationCursor });
+      setConversations((current) => [...current, ...page.conversations]);
+      setConversationCursor(page.nextCursor);
+      setHasMoreConversations(page.hasMore);
+    } catch {
+      showNotice('Não foi possível carregar mais conversas.');
+    } finally {
+      setConversationsLoading(false);
+    }
+  }, [conversationCursor, conversationsLoading, showNotice]);
+
+  const loadOlderMessages = useCallback(async () => {
+    const conversationId = activeConversationRef.current;
+    if (!conversationId || !messagesCursor || historyLoading) return;
+    setHistoryLoading(true);
+    try {
+      const page = await listMessages(conversationId, { before: messagesCursor });
+      if (activeConversationRef.current !== conversationId) return;
+      const combined = [...page.messages, ...messagesRef.current];
+      messagesRef.current = combined;
+      setMessages(combined);
+      setMessagesCursor(page.nextCursor);
+      setHasOlderMessages(page.hasMore);
+    } catch {
+      showNotice('Não foi possível carregar mensagens anteriores.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [historyLoading, messagesCursor, showNotice]);
+
+  const sendCommand = useCallback(async (rawCommand, retryMessageId = null) => {
     const command = rawCommand.trim();
     if (!command || processingRef.current) return;
+    if (command.length > MAX_MESSAGE_LENGTH) {
+      showNotice(`A mensagem pode ter no máximo ${MAX_MESSAGE_LENGTH} caracteres.`);
+      return;
+    }
+    const lastMessage = messagesRef.current.at(-1);
+    if (!retryMessageId && lastMessage?.role === 'user') return;
+    if (retryMessageId && lastMessage?.id !== retryMessageId) return;
+
+    const requestId = ++requestIdRef.current;
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
     processingRef.current = true;
     setProcessing(true);
-    setMessages((current) => [...current, {
-      id: `${Date.now()}-user`, role: 'user', text: command, time: new Date(),
-    }].slice(-50));
-    logEvent('COMMAND', `Comando demonstrativo enviado: “${command.slice(0, 90)}”.`);
     dispatchReactor('thinking');
-    const result = getCommandResult(command);
-    const firstTimer = window.setTimeout(() => {
+    logEvent('COMMAND', 'Mensagem enviada ao Jarvis.');
+
+    let conversationId = activeConversationRef.current;
+    let messageId = retryMessageId;
+    inFlightMessageRef.current = retryMessageId;
+
+    try {
+      if (!conversationId) {
+        const conversation = await createConversation();
+        if (requestId !== requestIdRef.current) {
+          setConversations((current) => [conversation, ...current]);
+          return;
+        }
+        conversationId = conversation.id;
+        activeConversationRef.current = conversation.id;
+        messagesRef.current = [];
+        setMessages([]);
+        setActiveConversationId(conversation.id);
+        setConversations((current) => [conversation, ...current]);
+      }
+
+      if (!messageId) {
+        let pendingDraft = pendingDraftRef.current.get(conversationId);
+        if (pendingDraft) {
+          if (
+            pendingDraft.content !== command
+          ) {
+            showNotice('Reenvie a mesma mensagem para confirmar se ela foi salva antes de enviar outra.');
+            processingRef.current = false;
+            requestControllerRef.current = null;
+            setProcessing(false);
+            dispatchReactor('idle');
+            return;
+          }
+        } else {
+          pendingDraft = {
+            content: command,
+            clientMessageId: crypto.randomUUID(),
+          };
+          pendingDraftRef.current.set(conversationId, pendingDraft);
+        }
+        const savedMessage = await addUserMessage(
+          conversationId,
+          command,
+          pendingDraft.clientMessageId,
+        );
+        messageId = savedMessage.id;
+        pendingDraftRef.current.delete(conversationId);
+        inFlightMessageRef.current = messageId;
+        if (activeConversationRef.current === conversationId) {
+          messagesRef.current = [...messagesRef.current, savedMessage];
+          setMessages(messagesRef.current);
+        }
+        if (requestId !== requestIdRef.current) {
+          if (activeConversationRef.current === conversationId) setFailedMessageId(messageId);
+          return;
+        }
+      }
+
+      const conversation = await touchConversation(conversationId, command);
+      if (requestId !== requestIdRef.current) return;
+      setConversations((current) => [
+        conversation,
+        ...current.filter((item) => item.id !== conversation.id),
+      ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+      setFailedMessageId(null);
+      const reply = await sendAssistantMessage({ conversationId, messageId }, { signal: controller.signal });
+      if (requestId !== requestIdRef.current) return;
+
+      if (activeConversationRef.current === conversationId) {
+        setMessages((current) => current.some((item) => item.id === reply.id)
+          ? current
+          : [...current, reply]);
+        messagesRef.current = [...messagesRef.current.filter((item) => item.id !== reply.id), reply];
+        setFailedMessageId(null);
+      }
+      const result = getCommandResult(command);
+      if (result?.route) changeRoute(result.route);
+      setConversations((current) => current
+        .map((item) => item.id === conversationId
+          ? { ...item, updatedAt: reply.time.toISOString() }
+          : item)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
       dispatchReactor('speaking');
-      setMessages((current) => [...current, {
-        id: `${Date.now()}-assistant`, role: 'assistant', text: result.text, time: new Date(),
-      }].slice(-50));
-      if (result.route) changeRoute(result.route);
-      const secondTimer = window.setTimeout(() => {
+      const successTimer = window.setTimeout(() => {
+        if (requestId !== requestIdRef.current) return;
         dispatchReactor('success');
-        const finalTimer = window.setTimeout(() => {
+        const idleTimer = window.setTimeout(() => {
+          if (requestId !== requestIdRef.current) return;
           dispatchReactor('idle');
           processingRef.current = false;
+          inFlightMessageRef.current = null;
+          requestControllerRef.current = null;
           setProcessing(false);
-        }, 850);
-        timersRef.current.push(finalTimer);
-      }, 450);
-      timersRef.current.push(secondTimer);
-    }, 560);
-    timersRef.current.push(firstTimer);
-  }, [changeRoute, logEvent]);
+        }, 700);
+        timersRef.current.push(idleTimer);
+      }, 300);
+      timersRef.current.push(successTimer);
+    } catch (error) {
+      if (requestId !== requestIdRef.current) return;
+      if (messageId && activeConversationRef.current === conversationId) setFailedMessageId(messageId);
+      if (controller.signal.aborted) {
+        showNotice('Interação interrompida. A mensagem foi salva e pode ser reenviada.');
+      } else {
+        const message = error instanceof Error ? error.message : 'Não foi possível obter uma resposta agora.';
+        showNotice(message);
+        logEvent('ASSISTANT', 'Falha ao obter ou salvar a resposta do assistente.', 'ERROR');
+        dispatchReactor('error');
+      }
+      processingRef.current = false;
+      inFlightMessageRef.current = null;
+      requestControllerRef.current = null;
+      setProcessing(false);
+    }
+  }, [changeRoute, logEvent, showNotice]);
+
+  const retryMessage = useCallback((messageId) => {
+    const message = messagesRef.current.find((item) => item.id === messageId);
+    if (message?.role === 'user') void sendCommand(message.text, message.id);
+  }, [sendCommand]);
 
   const toggleListening = useCallback(() => {
     if (processingRef.current) return;
@@ -261,20 +542,11 @@ function App() {
   }, [logEvent, reactorState]);
 
   const interrupt = useCallback(() => {
-    timersRef.current.forEach(window.clearTimeout);
-    timersRef.current = [];
-    processingRef.current = false;
-    setProcessing(false);
-    dispatchReactor('idle');
+    setFailedMessageId(inFlightMessageRef.current);
+    cancelPendingRequest();
     logEvent('REACTOR', 'Interação local interrompida.', 'WARNING');
-    showNotice('Interação interrompida.');
-  }, [logEvent, showNotice]);
-
-  const clearConversation = useCallback(() => {
-    setMessages([]);
-    logEvent('COMMAND', 'Histórico local da conversa limpo.');
-    showNotice('Conversa local limpa.');
-  }, [logEvent, showNotice]);
+    showNotice('Interação interrompida. A mensagem pode ser reenviada.');
+  }, [cancelPendingRequest, logEvent, showNotice]);
 
   const theme = useMemo(() => ACCENTS[preferences.accent], [preferences.accent]);
   const style = {
@@ -313,7 +585,19 @@ function App() {
               onSend={sendCommand}
               processing={processing}
               onInterrupt={interrupt}
-              onClear={clearConversation}
+              onNewConversation={handleNewConversation}
+              conversations={conversations}
+              activeConversationId={activeConversationId}
+              conversationsLoading={conversationsLoading}
+              hasMoreConversations={hasMoreConversations}
+              onLoadMoreConversations={loadMoreConversations}
+              onSelectConversation={selectConversation}
+              messagesLoading={messagesLoading}
+              historyLoading={historyLoading}
+              hasOlderMessages={hasOlderMessages}
+              onLoadOlderMessages={loadOlderMessages}
+              failedMessageId={failedMessageId}
+              onRetry={retryMessage}
               onNavigate={changeRoute}
             />
           )}
