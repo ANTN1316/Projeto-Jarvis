@@ -601,7 +601,7 @@ function App() {
               onNavigate={changeRoute}
             />
           )}
-          {route === 'brain' && <BrainView />}
+          {route === 'brain' && <BrainView userId={user.id} />}
           {route === 'log' && <LogView events={events} />}
           {route === 'modules' && <ModulesView onOpenModule={setModuleDetail} onNavigate={changeRoute} />}
           {route === 'settings' && <SettingsView preferences={preferences} onChange={updatePreference} persistenceStatus={preferenceStatus} profile={profile} onSaveProfile={handleProfileSave} />}

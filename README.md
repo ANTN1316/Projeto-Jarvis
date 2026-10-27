@@ -7,14 +7,14 @@ Aplicação React + Vite para a interface do J.A.R.V.I.S. O projeto inclui auten
 - React 18 e Vite.
 - Supabase Auth e PostgreSQL com Row Level Security (RLS).
 - React Router para rotas públicas e privadas.
-- As notas do Second Brain e os comandos de navegação continuam demonstrativos; não representam dados persistidos.
+- As memórias do Second Brain são registros pessoais persistidos e isolados por conta; os comandos de navegação continuam locais.
 
 ## Fase 1 preservada
 
 - Núcleo SVG interativo com estados de espera, escuta simulada, processamento, resposta e conclusão.
 - Console do Jarvis: atalhos de navegação continuam locais; mensagens livres usam a integração de IA quando a Edge Function estiver configurada.
 - Navegação entre Core, Second Brain, System Log, Modules e Settings.
-- Mapa SVG interativo com notas fictícias, conexões, zoom e reposicionamento por toque ou ponteiro.
+- Second Brain com notas e memórias privadas, categorias, origem, pesquisa textual, edição e exclusão.
 - Registro de eventos limitado a 40 itens, preferências visuais e layout responsivo com suporte a movimento reduzido.
 
 ## Pré-requisitos e instalação
@@ -91,6 +91,23 @@ Não use `--no-verify-jwt`. Não é necessário adicionar `@supabase/ssr` nem in
 
 O rate limit em memória é uma proteção básica por instância: múltiplas instâncias podem aceitar mais chamadas do que esse limite. Antes de uso público, complemente-o com controle global por usuário (por exemplo, contador persistente/serviço de rate limiting) e limites de gasto no provedor.
 
+## Second Brain (Fase 3.4)
+
+O Second Brain usa a tabela `public.brain_memories`, criada por [`supabase/migrations/20261025215452_phase_3_4_second_brain.sql`](./supabase/migrations/20261025215452_phase_3_4_second_brain.sql). Ela armazena título, conteúdo, categoria, proveniência e referência de origem. As categorias iniciais são nota/ideia, memória pessoal, projeto e decisão; tarefas foram deixadas de fora porque o projeto não tem um módulo de tarefas existente. As memórias só são persistidas quando o usuário salva explicitamente. Não há importação de documentos nem gravação automática de conversas.
+
+A migration habilita RLS, concede à role `authenticated` somente as operações e colunas necessárias e restringe leitura, criação, atualização e exclusão ao `auth.uid()` do proprietário. O campo `user_id` é preenchido pelo banco e não pode ser fornecido no `INSERT` do cliente. A função `search_brain_memories` é `SECURITY INVOKER`, usa a identidade autenticada, a política RLS e uma busca textual em português para retornar no máximo cinco resultados ordenados por relevância. A Edge Function `jarvis-chat` chama essa busca com a mensagem atual, envia somente trechos limitados como contexto não confiável e inclui títulos de referência na resposta. Uma memória excluída deixa de ser retornada pela busca.
+
+Não salve senhas, tokens, chaves ou outros segredos. O formulário bloqueia alguns padrões comuns de credenciais como defesa de interface, mas não consegue identificar toda informação secreta possível. Texto recuperado de memórias ou documentos é tratado como dado, nunca como instrução confiável. O contexto é enviado ao provedor de IA junto com a mensagem e o histórico da conversa; não registre informações que não queira transmitir.
+
+### Validar e implantar
+
+1. Antes de aplicar, vincule o CLI ao projeto Supabase correto (`npx supabase link`) e confira o estado das migrations/tabelas remotas. A inspeção remota não pôde ser feita durante esta implementação porque o diretório não está vinculado (`ProjectRefNotLinkedError`). A existência desta migration local não comprova que foi aplicada nem que a tabela ainda não existe remotamente.
+2. Confirme no SQL Editor se `brain_memories` ou `search_brain_memories` já existem e se são compatíveis com esta migration. Não execute a migration às cegas; se os objetos existirem, reconcilie o schema primeiro. A migration não foi aplicada ao banco remoto nesta execução.
+3. Depois da revisão do schema remoto, aplique as migrations locais pendentes pelo procedimento controlado do projeto. `db push` pode aplicar outras migrations pendentes também; revise a lista antes de confirmar. Confira no Dashboard que a tabela está exposta pela Data API e que os grants foram mantidos. A policy RLS não substitui os grants da Data API.
+4. Implante a Function atualizada `jarvis-chat` e verifique que o projeto já tem `OPENAI_API_KEY` configurada como secret no backend. Nenhuma chave privada deve ser colocada em variável `VITE_*`.
+5. Execute `npx supabase test db` em ambiente local com a stack Supabase/Docker. O arquivo `supabase/tests/brain_memories_rls.test.sql` cobre criação, leitura, alteração, exclusão, busca e isolamento entre duas contas.
+6. Após aplicar a migration e implantar a Function, entre com uma conta de teste, crie uma nota, atualize a página, pesquise-a, edite-a, peça ao Jarvis uma resposta que dependa dela e exclua-a. Confirme as referências na resposta e que ela deixa de aparecer na pesquisa contextual. Repita com uma segunda conta e verifique o isolamento.
+
 ### Implantar e validar a Fase 3.3 (migração não aplicada automaticamente)
 
 1. No projeto Supabase correto, execute consultas somente leitura no SQL Editor para verificar se as tabelas e os nomes de policies/índices já existem. A inspeção remota não foi possível durante a implementação: o repositório não está vinculado a um projeto (`supabase migration list --linked` retorna `ProjectRefNotLinkedError`). A migration usa `CREATE TABLE` sem `IF NOT EXISTS` intencionalmente, para falhar em vez de mascarar uma tabela preexistente incompatível.
@@ -149,7 +166,7 @@ Não existe um runner de testes frontend configurado. A migração adiciona o te
 
 Para verificar isolamento, crie duas contas de teste distintas e tente ler/alterar pelo cliente Supabase o perfil e as preferências da outra conta, inserir uma preferência usando o `user_id` alheio e executar operações sem sessão. RLS deve bloquear os acessos cruzados. Não use usuários reais nem credenciais privilegiadas nesses testes.
 
-As notas do grafo, histórico de eventos e estados do reator continuam locais e demonstrativos. Perfil, preferências e conversas do chat são persistidos no PostgreSQL. Ainda não existe memória inteligente para o Second Brain, execução de ferramentas pelo modelo, comandos personalizáveis ou integração de voz.
+O histórico de eventos e os estados do reator continuam locais e demonstrativos. Perfil, preferências, conversas, mensagens e memórias do Second Brain são persistidos no PostgreSQL. Execução de ferramentas pelo modelo, comandos personalizáveis, importação de documentos e integração de voz ainda não foram implementados.
 
 ## Publicação futura
 

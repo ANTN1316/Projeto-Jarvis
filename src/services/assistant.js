@@ -13,6 +13,7 @@ const ERROR_MESSAGES = {
   provider_rate_limited: 'O serviço de IA está ocupado. Aguarde e tente novamente.',
   provider_timeout: 'A resposta demorou demais. Tente novamente.',
   provider_error: 'Não foi possível obter uma resposta agora.',
+  memory_lookup_failed: 'Não foi possível consultar sua memória pessoal. Tente novamente mais tarde.',
   service_unavailable: 'O assistente ainda não está configurado no servidor.',
 };
 

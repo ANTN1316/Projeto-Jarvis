@@ -1,5 +1,11 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CATEGORY_COLORS, MODULES, NAV_ITEMS, NOTE_LINKS, NOTES } from './data.js';
+import { MODULES, NAV_ITEMS } from './data.js';
+import {
+  createBrainMemory,
+  deleteBrainMemory,
+  listBrainMemories,
+  updateBrainMemory,
+} from './services/brain.js';
 
 const iconPaths = {
   core: <><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3m0 14v3M2 12h3m14 0h3" /></>,
@@ -20,6 +26,7 @@ const iconPaths = {
   stop: <><rect x="5" y="5" width="14" height="14" rx="3" /></>,
   trash: <><path d="M3 6h18m-2 0-.9 14H5.9L5 6m4 0V4h6v2m-5 4v6m4-6v6" /></>,
   close: <><path d="m18 6-12 12M6 6l12 12" /></>,
+  search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 5 5" /></>,
   info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8h.01" /></>,
   plus: <><path d="M12 5v14M5 12h14" /></>,
   minus: <><path d="M5 12h14" /></>,
@@ -180,7 +187,7 @@ export function CoreView({
           </section>
           <section className="panel quick-panel">
             <div className="panel-heading"><span className="panel-index">02</span><div><h2>Atalhos</h2><small>COMANDOS DE NAVEGAÇÃO</small></div></div>
-            <button className="quick-link" onClick={() => onNavigate('brain')}><Icon name="brain" /><span>Explorar memória<small>Second Brain · demonstração</small></span><Icon name="arrow" size={15} /></button>
+            <button className="quick-link" onClick={() => onNavigate('brain')}><Icon name="brain" /><span>Explorar memória<small>Second Brain · notas pessoais</small></span><Icon name="arrow" size={15} /></button>
             <button className="quick-link" onClick={() => onNavigate('modules')}><Icon name="modules" /><span>Ver módulos<small>Estados e disponibilidade</small></span><Icon name="arrow" size={15} /></button>
           </section>
         </aside>
@@ -312,55 +319,176 @@ function CommandConsole({
   );
 }
 
-export function BrainView() {
-  const [selectedId, setSelectedId] = useState('n2');
-  const [zoom, setZoom] = useState(1);
-  const [dragState, setDragState] = useState(null);
-  const [positions, setPositions] = useState(() => Object.fromEntries(NOTES.map((note) => [note.id, { x: note.x, y: note.y }])));
-  const svgRef = useRef(null);
-  const selected = NOTES.find((note) => note.id === selectedId);
-  const categories = useMemo(() => [...new Set(NOTES.map((note) => note.category))], []);
-  const pointFromEvent = (event) => {
-    const svg = svgRef.current;
-    if (!svg) return null;
-    const rect = svg.getBoundingClientRect();
-    return { x: ((event.clientX - rect.left) / rect.width) * 720, y: ((event.clientY - rect.top) / rect.height) * 500 };
+export function BrainView({ userId }) {
+  const [memories, setMemories] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [category, setCategory] = useState('all');
+  const [searchInput, setSearchInput] = useState('');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [formError, setFormError] = useState('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [draft, setDraft] = useState({
+    title: '',
+    content: '',
+    category: 'note',
+    provenance: 'user',
+    source: '',
+  });
+  const categories = [
+    { id: 'note', label: 'Nota / ideia' },
+    { id: 'memory', label: 'Memória pessoal' },
+    { id: 'project', label: 'Projeto' },
+    { id: 'decision', label: 'Decisão' },
+  ];
+  const provenanceOptions = [
+    { id: 'user', label: 'Informação fornecida por mim' },
+    { id: 'document', label: 'Conteúdo de documento' },
+    { id: 'ai_confirmed', label: 'Sugestão de IA confirmada por mim' },
+  ];
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setQuery(searchInput.trim());
+      setPage(0);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError('');
+    listBrainMemories(userId, { query, category, page }).then((result) => {
+      if (!active) return;
+      setMemories(result.memories);
+      setHasMore(result.hasMore);
+      setSelectedId((current) => result.memories.some((memory) => memory.id === current)
+        ? current
+        : result.memories[0]?.id || null);
+    }).catch(() => {
+      if (!active) return;
+      setError('Não foi possível carregar suas memórias. Verifique sua conexão e se a migration do Second Brain já foi aplicada.');
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [category, page, query, reloadKey, userId]);
+
+  const selected = memories.find((memory) => memory.id === selectedId);
+  const openNewMemory = () => {
+    setEditingId(null);
+    setDraft({ title: '', content: '', category: 'note', provenance: 'user', source: '' });
+    setFormError('');
+    setEditorOpen(true);
   };
-  const moveNode = (event) => {
-    if (!dragState) return;
-    const point = pointFromEvent(event);
-    if (!point) return;
-    setPositions((current) => ({ ...current, [dragState.id]: { x: Math.min(670, Math.max(50, point.x / zoom)), y: Math.min(455, Math.max(45, point.y / zoom)) } }));
+  const openEditor = (memory) => {
+    setEditingId(memory.id);
+    setDraft({
+      title: memory.title,
+      content: memory.content,
+      category: memory.category,
+      provenance: memory.provenance,
+      source: memory.source || '',
+    });
+    setFormError('');
+    setEditorOpen(true);
   };
+  const saveMemory = async (event) => {
+    event.preventDefault();
+    setFormError('');
+    if (/(?:senha|password|token|api[_ -]?key|secret)\s*[:=]\s*\S+/i.test(`${draft.title}\n${draft.content}\n${draft.source}`)
+      || /\b(?:sb_secret_|sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{16,})/i.test(`${draft.title}\n${draft.content}\n${draft.source}`)) {
+      setFormError('Não salve senhas, tokens, chaves ou outros segredos nesta memória.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const memory = editingId
+        ? await updateBrainMemory(userId, editingId, draft)
+        : await createBrainMemory(userId, draft);
+      setSelectedId(memory.id);
+      setPage(0);
+      setEditorOpen(false);
+      setReloadKey((value) => value + 1);
+    } catch {
+      setFormError('Não foi possível salvar a memória. Confira os limites dos campos e tente novamente.');
+    } finally {
+      setSaving(false);
+    }
+  };
+  const removeMemory = async () => {
+    if (!selected || !window.confirm(`Excluir "${selected.title}"? Ela deixará de aparecer nas buscas e no contexto do Jarvis.`)) return;
+    setError('');
+    try {
+      await deleteBrainMemory(userId, selected.id);
+      setSelectedId(null);
+      setEditorOpen(false);
+      setReloadKey((value) => value + 1);
+    } catch {
+      setError('Não foi possível excluir esta memória. Tente novamente.');
+    }
+  };
+  const categoryLabel = (value) => categories.find((item) => item.id === value)?.label || value;
+  const provenanceLabel = (value) => provenanceOptions.find((item) => item.id === value)?.label || value;
+
   return (
     <div className="view-content brain-view">
-      <PageHeading eyebrow="MEMÓRIA VISUAL / 02" title="Second Brain" subtitle="Mapa de conhecimento local com conteúdo inteiramente fictício." aside={<span className="demo-stamp"><i /> DADOS DE DEMONSTRAÇÃO</span>} />
-      <div className="brain-summary"><div className="summary-card"><span>NOTAS VISUAIS</span><strong>{NOTES.length.toString().padStart(2, '0')}</strong><small>NÓS NO MAPA</small></div><div className="summary-card"><span>CATEGORIAS</span><strong>{categories.length.toString().padStart(2, '0')}</strong><small>GRUPOS DE CONHECIMENTO</small></div><div className="summary-card"><span>CONEXÕES</span><strong>{NOTE_LINKS.length.toString().padStart(2, '0')}</strong><small>RELAÇÕES LOCAIS</small></div><div className="summary-card summary-note"><Icon name="info" size={16} /><span>Exemplos fictícios para explorar a visualização. Nenhuma memória pessoal está armazenada.</span></div></div>
-      <div className="brain-layout">
-        <section className="panel graph-panel">
-          <div className="panel-heading"><span className="panel-index">MAPA 01</span><div><h2>Rede de conhecimento</h2><small>ARRASTE OS NÓS · SELECIONE PARA VER DETALHES</small></div><div className="zoom-controls"><button className="icon-button small" onClick={() => setZoom((value) => Math.max(.75, Number((value - .1).toFixed(2))))} aria-label="Diminuir zoom"><Icon name="minus" size={15} /></button><span>{Math.round(zoom * 100)}%</span><button className="icon-button small" onClick={() => setZoom((value) => Math.min(1.35, Number((value + .1).toFixed(2))))} aria-label="Aumentar zoom"><Icon name="plus" size={15} /></button><button className="icon-button small reset-zoom" onClick={() => { setZoom(1); setPositions(Object.fromEntries(NOTES.map((note) => [note.id, { x: note.x, y: note.y }]))); }} aria-label="Redefinir mapa">↺</button></div></div>
-          <div className="graph-wrap"><svg ref={svgRef} viewBox="0 0 720 500" className="brain-graph" role="img" aria-label="Grafo interativo de notas fictícias" onPointerMove={moveNode} onPointerUp={() => setDragState(null)} onPointerCancel={() => setDragState(null)} onPointerLeave={() => setDragState(null)}>
-            <defs><pattern id="graph-dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="rgba(117,165,196,.2)" /></pattern><radialGradient id="graph-aura"><stop stopColor="var(--accent-primary)" stopOpacity=".13" /><stop offset="1" stopColor="var(--accent-primary)" stopOpacity="0" /></radialGradient></defs>
-            <rect width="720" height="500" fill="url(#graph-dots)" /><circle cx="380" cy="245" r="190" fill="url(#graph-aura)" />
-            <g transform={`scale(${zoom})`}>
-              {NOTE_LINKS.map(([from, to]) => <line key={`${from}-${to}`} x1={positions[from].x} y1={positions[from].y} x2={positions[to].x} y2={positions[to].y} className={`graph-edge${from === selectedId || to === selectedId ? ' edge-active' : ''}`} />)}
-              {NOTES.map((note) => {
-                const p = positions[note.id];
-                const color = CATEGORY_COLORS[note.category];
-                return <g key={note.id} transform={`translate(${p.x} ${p.y})`} className={`graph-node${note.id === selectedId ? ' selected' : ''}${dragState?.id === note.id ? ' dragging' : ''}`} role="button" tabIndex="0" aria-label={`${note.title}, categoria ${note.category}`} onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); setSelectedId(note.id); setDragState({ id: note.id }); }} onPointerUp={() => setDragState(null)} onClick={() => setSelectedId(note.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(note.id); } }}>
-                  <circle r={note.id === 'n1' ? 13 : 9} fill={`${color}22`} stroke={color} className="node-halo" /><circle r={note.id === 'n1' ? 5 : 4} fill={color} /><text x="15" y="4">{note.title}</text>
-                </g>;
-              })}
-            </g>
-          </svg></div>
-          <div className="graph-legend">{categories.map((category) => <span key={category}><i style={{ backgroundColor: CATEGORY_COLORS[category] }} />{category}</span>)}</div>
-        </section>
-        <aside className="panel note-detail">
-          <div className="panel-heading"><span className="panel-index">DETALHE</span><div><h2>Nó selecionado</h2><small>INFORMAÇÃO DE DEMONSTRAÇÃO</small></div></div>
-          {selected && <div className="note-content"><span className="category-chip" style={{ '--category-color': CATEGORY_COLORS[selected.category] }}><i />{selected.category}</span><h3>{selected.title}</h3><p>{selected.summary}</p><div className="note-meta"><span>ID DA NOTA</span><b>{selected.id.toUpperCase()}</b></div><div className="note-meta"><span>ORIGEM</span><b>CONTEÚDO FICTÍCIO</b></div><div className="related-notes"><span>NOTAS RELACIONADAS</span>{NOTE_LINKS.filter(([a, b]) => a === selected.id || b === selected.id).map(([a, b]) => { const relatedId = a === selected.id ? b : a; const note = NOTES.find((item) => item.id === relatedId); return <button key={relatedId} onClick={() => setSelectedId(relatedId)}><i style={{ backgroundColor: CATEGORY_COLORS[note.category] }} />{note.title}<Icon name="arrow" size={13} /></button>; })}</div></div>}
-          <div className="panel-footnote"><Icon name="info" size={13} /> O mapa existe apenas nesta sessão e usa dados de exemplo.</div>
-        </aside>
-      </div>
+      <PageHeading eyebrow="MEMÓRIA PESSOAL / 02" title="Second Brain" subtitle="Notas privadas da sua conta, pesquisáveis e recuperadas pelo Jarvis quando forem relevantes." aside={<span className="saved-indicator"><Icon name="check" size={14} /> DADOS DA CONTA</span>} />
+      <section className="panel brain-manager">
+        <div className="panel-heading">
+          <span className="panel-index">MEMÓRIAS</span>
+          <div><h2>Conhecimento pessoal</h2><small>ISOLADO POR CONTA · SALVAMENTO EXPLÍCITO</small></div>
+          <button className="brain-action" type="button" onClick={openNewMemory}><Icon name="plus" size={15} /> NOVA MEMÓRIA</button>
+        </div>
+        <div className="brain-toolbar">
+          <label className="brain-search"><span className="sr-only">Pesquisar memórias</span><Icon name="search" size={15} /><input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} maxLength={120} placeholder="Pesquisar notas e memórias..." /></label>
+          <label className="brain-filter"><span className="sr-only">Filtrar categoria</span><select value={category} onChange={(event) => { setCategory(event.target.value); setPage(0); }}><option value="all">Todas as categorias</option>{categories.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+        </div>
+        {error && <div className="brain-message brain-error" role="alert"><span>{error}</span><button type="button" onClick={() => setReloadKey((value) => value + 1)}>TENTAR NOVAMENTE</button></div>}
+        {editorOpen && <form className="brain-editor" onSubmit={saveMemory}>
+          <div className="brain-editor-heading"><div><span className="eyebrow">{editingId ? 'EDIÇÃO' : 'NOVO REGISTRO'}</span><h3>{editingId ? 'Editar memória' : 'Salvar conhecimento'}</h3></div><button className="icon-button small" type="button" onClick={() => setEditorOpen(false)} aria-label="Fechar editor"><Icon name="close" size={15} /></button></div>
+          <label htmlFor="brain-title">Título</label>
+          <input id="brain-title" value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} maxLength={160} required />
+          <label htmlFor="brain-content">Conteúdo</label>
+          <textarea id="brain-content" value={draft.content} onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))} maxLength={10000} rows={6} required />
+          <div className="brain-form-grid">
+            <label>Categoria<select value={draft.category} onChange={(event) => setDraft((current) => ({ ...current, category: event.target.value }))}>{categories.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+            <label>Origem<select value={draft.provenance} onChange={(event) => setDraft((current) => ({ ...current, provenance: event.target.value }))}>{provenanceOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+          </div>
+          <label htmlFor="brain-source">Referência de origem <span>(opcional)</span></label>
+          <input id="brain-source" value={draft.source} onChange={(event) => setDraft((current) => ({ ...current, source: event.target.value }))} maxLength={120} placeholder="Ex.: nome do documento ou contexto" />
+          <p className="brain-privacy-note"><Icon name="info" size={14} /> Não salve senhas, tokens ou chaves. Memórias marcadas como conteúdo de documento são dados não confiáveis, nunca instruções para ações.</p>
+          {formError && <div className="brain-message brain-error" role="alert">{formError}</div>}
+          <div className="brain-editor-actions"><span>{draft.content.length}/10000</span><button className="button-secondary" type="button" onClick={() => setEditorOpen(false)} disabled={saving}>CANCELAR</button><button className="brain-action" type="submit" disabled={saving}>{saving ? 'SALVANDO…' : 'SALVAR EXPLICITAMENTE'}</button></div>
+        </form>}
+        <div className="brain-record-layout">
+          <div className="brain-record-list" aria-busy={loading}>
+            {loading && <div className="brain-empty">Carregando memórias…</div>}
+            {!loading && !error && memories.map((memory) => (
+              <button key={memory.id} type="button" className={`brain-record${selectedId === memory.id ? ' selected' : ''}`} onClick={() => { setSelectedId(memory.id); setEditorOpen(false); }} aria-pressed={selectedId === memory.id}>
+                <span className="brain-record-meta"><span>{categoryLabel(memory.category)}</span><time dateTime={memory.updatedAt}>{new Date(memory.updatedAt).toLocaleDateString('pt-BR')}</time></span>
+                <strong>{memory.title}</strong><small>{memory.content.slice(0, 150)}{memory.content.length > 150 ? '…' : ''}</small>
+              </button>
+            ))}
+            {!loading && !error && memories.length === 0 && <div className="brain-empty"><Icon name="brain" size={20} /><strong>{query || category !== 'all' ? 'Nenhum resultado encontrado.' : 'Sua memória começa aqui.'}</strong><span>{query || category !== 'all' ? 'Tente outro termo ou categoria.' : 'Crie uma nota ou salve explicitamente uma informação para o Jarvis.'}</span></div>}
+            {!loading && !error && (page > 0 || hasMore) && <div className="brain-pagination"><button type="button" className="button-secondary" onClick={() => setPage((value) => Math.max(0, value - 1))} disabled={page === 0}>ANTERIOR</button><span>PÁGINA {page + 1}</span><button type="button" className="button-secondary" onClick={() => setPage((value) => value + 1)} disabled={!hasMore}>PRÓXIMA</button></div>}
+          </div>
+          <aside className="brain-detail" aria-live="polite">
+            {selected && !editorOpen ? <>
+              <div className="brain-detail-top"><span className="category-chip"><i />{categoryLabel(selected.category)}</span><div><button className="icon-button small" type="button" onClick={() => openEditor(selected)} aria-label="Editar memória"><Icon name="settings" size={15} /></button><button className="icon-button small brain-delete" type="button" onClick={removeMemory} aria-label="Excluir memória"><Icon name="trash" size={15} /></button></div></div>
+              <h3>{selected.title}</h3><p className="brain-detail-content">{selected.content}</p>
+              <dl><div><dt>ORIGEM</dt><dd>{provenanceLabel(selected.provenance)}</dd></div>{selected.source && <div><dt>REFERÊNCIA</dt><dd>{selected.source}</dd></div>}<div><dt>CRIADA</dt><dd>{new Date(selected.createdAt).toLocaleString('pt-BR')}</dd></div><div><dt>ATUALIZADA</dt><dd>{new Date(selected.updatedAt).toLocaleString('pt-BR')}</dd></div></dl>
+            </> : <div className="brain-empty brain-detail-empty"><Icon name="info" size={20} /><span>Selecione uma memória para consultar ou editar.</span></div>}
+          </aside>
+        </div>
+      </section>
     </div>
   );
 }
