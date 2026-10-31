@@ -51,7 +51,7 @@ alter table public.chat_messages enable row level security;
 revoke all on public.chat_conversations, public.chat_messages from public, anon, authenticated;
 grant select, insert, delete on public.chat_conversations to authenticated;
 grant update (title, updated_at) on public.chat_conversations to authenticated;
-grant select, insert, delete on public.chat_messages to authenticated;
+grant select, delete on public.chat_messages to authenticated;
 grant select, insert on public.chat_messages to service_role;
 grant insert (
   conversation_id,

@@ -76,7 +76,7 @@ as $$
   where memory.user_id = (select auth.uid())
     and memory.search_vector @@ query.term
   order by relevance desc, memory.updated_at desc, memory.id desc
-  limit pg_catalog.least(pg_catalog.greatest(result_limit, 1), 5);
+  limit least(greatest(result_limit, 1), 5);
 $$;
 
 revoke all on function public.search_brain_memories(text, integer) from public, anon, authenticated;

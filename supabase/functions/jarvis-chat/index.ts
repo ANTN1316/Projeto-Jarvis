@@ -12,8 +12,44 @@ const WINDOW_MS = 60_000
 const PROVIDER_TIMEOUT_MS = 25_000
 const usageByUser = new Map<string, { startedAt: number; count: number }>()
 
-function errorResponse(status: number, code: string, message: string) {
-  return Response.json({ error: { code, message } }, { status })
+const ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
+  // Reservado para inclusão do domínio de produção quando definido:
+  ...(Deno.env.get("APP_ORIGIN") ? [Deno.env.get("APP_ORIGIN")!.trim()] : []),
+])
+
+function getCorsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("origin")?.trim() || ""
+  const isAllowed = ALLOWED_ORIGINS.has(origin)
+
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "authorization, apikey, x-client-info, content-type",
+    "Vary": "Origin",
+  }
+
+  if (isAllowed) {
+    headers["Access-Control-Allow-Origin"] = origin
+  }
+
+  return headers
+}
+
+function errorResponse(status: number, code: string, message: string, corsHeaders?: Record<string, string>) {
+  return Response.json(
+    { error: { code, message } },
+    {
+      status,
+      headers: corsHeaders,
+    },
+  )
+}
+
+function jsonResponse(data: unknown, status = 200, corsHeaders?: Record<string, string>) {
+  return Response.json(data, {
+    status,
+    headers: corsHeaders,
+  })
 }
 
 function takeRateLimit(userId: string): boolean {
@@ -96,16 +132,26 @@ function prepareMemoryContext(rows: Array<{
   }
 }
 
-export default {
-  fetch: withSupabase({ auth: "user" }, async (request, context) => {
-    const userId = context.userClaims?.id
-    if (!userId) {
-      return errorResponse(401, "unauthorized", "Entre na sua conta para usar o assistente.")
-    }
+const supabaseHandler = withSupabase({ auth: "user" }, async (request, context) => {
+    const corsHeaders = getCorsHeaders(request)
 
     if (request.method !== "POST") {
-      return errorResponse(405, "method_not_allowed", "Método não permitido.")
+      return errorResponse(405, "method_not_allowed", "Método não permitido.", corsHeaders)
     }
+
+    const authHeader = request.headers.get("authorization") || request.headers.get("Authorization")
+    const token = authHeader?.replace(/^Bearer\s+/i, "")?.trim()
+    if (!token) {
+      return errorResponse(401, "unauthorized", "Entre na sua conta para usar o assistente.", corsHeaders)
+    }
+
+    // Validação criptográfica do JWT (assinatura, validade e integridade do usuário) junto ao Supabase Auth
+    const { data: authData, error: authError } = await context.supabase.auth.getUser(token)
+    if (authError || !authData?.user?.id) {
+      return errorResponse(401, "unauthorized", "Sua sessão não é válida ou expirou. Entre novamente.", corsHeaders)
+    }
+
+    const userId = authData.user.id
 
     const contentType = request.headers.get("content-type")?.toLowerCase() || ""
     if (!contentType.includes("application/json")) {
@@ -220,13 +266,13 @@ export default {
         console.error("jarvis-chat: conversation timestamp update failed")
         return errorResponse(500, "conversation_update_failed", "Não foi possível atualizar a conversa.")
       }
-      return Response.json({
+      return jsonResponse({
         message: {
           id: existingReply.id,
           content: existingReply.content,
           created_at: existingReply.created_at,
         },
-      })
+      }, 200, corsHeaders)
     }
 
     const { data: recentMessages, error: historyError } = await context.supabase
@@ -334,13 +380,13 @@ export default {
             const duplicateReply = await findExistingReply()
             if (duplicateReply) {
               await touchConversation()
-              return Response.json({
+              return jsonResponse({
                 message: {
                   id: duplicateReply.id,
                   content: duplicateReply.content,
                   created_at: duplicateReply.created_at,
                 },
-              })
+              }, 200, corsHeaders)
             }
           } catch {
             console.error("jarvis-chat: duplicate reply lookup failed")
@@ -357,13 +403,13 @@ export default {
         return errorResponse(500, "conversation_update_failed", "A resposta foi gerada, mas não foi possível atualizar a conversa.")
       }
 
-      return Response.json({
+      return jsonResponse({
         message: {
           id: assistantMessage.id,
           content: assistantMessage.content,
           created_at: assistantMessage.created_at,
         },
-      })
+      }, 200, corsHeaders)
     } catch (error) {
       const timedOut = error instanceof DOMException && error.name === "AbortError"
       if (!timedOut) console.error("jarvis-chat: provider request failed unexpectedly")
@@ -375,5 +421,48 @@ export default {
     } finally {
       clearTimeout(timeout)
     }
-  }),
+  })
+
+export default {
+  async fetch(request: Request, ...args: unknown[]) {
+    const corsHeaders = getCorsHeaders(request)
+
+    // 1. Tratamento imediato de preflight OPTIONS antes de qualquer validação de autenticação
+    if (request.method === "OPTIONS") {
+      const origin = request.headers.get("origin")?.trim() || ""
+      if (origin && !ALLOWED_ORIGINS.has(origin)) {
+        return new Response(null, {
+          status: 403,
+          headers: { "Vary": "Origin" },
+        })
+      }
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders,
+      })
+    }
+
+    // 2. Encaminha para o handler principal
+    const response = await (supabaseHandler as (req: Request, ...rest: unknown[]) => Promise<Response>)(request, ...args)
+
+    // 3. Garante que todas as respostas (sucesso ou erro) contenham os cabeçalhos CORS
+    try {
+      for (const [key, value] of Object.entries(corsHeaders)) {
+        if (!response.headers.has(key)) {
+          response.headers.set(key, value)
+        }
+      }
+      return response
+    } catch {
+      const newHeaders = new Headers(response.headers)
+      for (const [key, value] of Object.entries(corsHeaders)) {
+        newHeaders.set(key, value)
+      }
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+      })
+    }
+  },
 }
